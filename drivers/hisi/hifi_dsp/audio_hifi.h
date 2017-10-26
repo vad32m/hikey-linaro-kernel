@@ -212,30 +212,63 @@ struct misc_io_pcm_buf_param {
 	uint64_t buf;
 	uint32_t buf_size;
 };
-
-
 /* XAF STRUCTURES */
-
 /* ...command/response message */
-typedef struct xf_proxy_msg {
+typedef struct xf_proxy_message	{
 	/* ...session ID */
-	uint32_t                 id;
-
+	uint32_t	id;
 	/* ...proxy API command/reponse code */
-	uint32_t                 opcode;
-
+	uint32_t	opcode;
 	/* ...length of attached buffer */
-	uint32_t                 length;
+	uint32_t	length;
+	/* ...physical address of message buffer */
+	uint64_t	address;
+	uint64_t	v_address;
 
-	/* ...shared logical address of message buffer */
-	uint64_t                 address;
+}	__attribute__((__packed__)) xf_proxy_message_t;
+typedef struct xf_proxy_msg_usr	{
+	/* ...session-id field */
+	uint32_t	id;
+	/* ...message opcode */
+	uint32_t	opcode;
+	/* ...buffer length */
+	uint32_t	length;
+	/* ...buffer pointer */
+	uint64_t	address;
+	uint64_t	v_address;
+}	__attribute__((__packed__)) xf_proxy_message_usr_t;
+/*proxy IPC data */
+/*size of the internal message pool */
+/*make it equal to at least ring-buffer */
+#define XF_CFG_MESSAGE_POOL_SIZE        256
+/* ...execution message */
+typedef struct xf_message       xf_message_t;
+/* ...message queue */
+typedef struct xf_msg_queue     xf_msg_queue_t;
 
-}	__attribute__((__packed__)) xf_proxy_msg_t;
+typedef struct xf_proxy             xf_proxy_t;
 
-/*
-  *end
-  */
+/* ...execution message */
+struct xf_message {
+	xf_message_t	*next;
+	uint32_t	id;
+	uint32_t	opcode;
+	uint32_t	length;
+	uint64_t	address;
+	uint64_t	v_address;
+};
 
+/* ...message queue */
+struct xf_msg_queue {
+	xf_message_t	*head;
+	xf_message_t	*tail;
+};
+/* ...proxy data */
+struct xf_proxy {
+	xf_msg_queue_t	response;
+	xf_message_t	pool[XF_CFG_MESSAGE_POOL_SIZE];
+	xf_message_t	*free;
+};
 #define HIFI_MISC_IOCTL_ASYNCMSG		_IOWR('A', 0x70, struct misc_io_async_param)
 #define HIFI_MISC_IOCTL_SYNCMSG 		_IOW('A', 0x71, struct misc_io_sync_param)
 #define HIFI_MISC_IOCTL_SENDDATA_SYNC	_IOW('A', 0x72, struct misc_io_senddata_sync_param)
@@ -248,9 +281,9 @@ typedef struct xf_proxy_msg {
 #define HIFI_MISC_IOCTL_DISPLAY_MSG		_IOWR('A', 0x79, struct misc_io_dump_buf_param)
 #define HIFI_MISC_IOCTL_WAKEUP_PCM_READ_THREAD _IOW('A',  0x7a, unsigned int)
 #define HIFI_MISC_IOCTL_PCM_GAIN _IOW('A',  0x7b, struct misc_io_pcm_buf_param)
-#define HIFI_MISC_IOCTL_XAF_IPC_MSG_SEND _IOW('A',  0x7c, xf_proxy_msg_t)
-#define HIFI_MISC_IOCTL_XAF_IPC_MSG_RECV _IOR('A', 0x7d, xf_proxy_msg_t)
-
+#define HIFI_MISC_IOCTL_XAF_IPC_MSG_SEND _IOW('A',  0x7c, xf_proxy_message_t)
+#define HIFI_MISC_IOCTL_XAF_IPC_MSG_RECV _IOR('A', 0x7d, xf_proxy_message_t)
+#define HIFI_MISC_IOCTL_XAF_IPC_VMSG_PTR _IOR('A', 0x7e, xf_proxy_message_t)
 #ifdef CLT_VOICE
 #define CLT_HIFI_MISC_IOCTL_SEND_VOICE _IOWR('A', 0x90, struct misc_io_async_param)
 #endif
