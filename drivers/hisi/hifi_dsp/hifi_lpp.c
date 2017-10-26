@@ -955,12 +955,11 @@ static long hifi_misc_ioctl(struct file *fd, unsigned int cmd,
 
 	case HIFI_MISC_IOCTL_XAF_IPC_MSG_SEND:
 	{
-		struct xf_proxy_msg xaf_msg;
+		xf_proxy_message_usr_t xaf_msg;
 
 		logi("ioctl: HIFI_MISC_IOCTL_XAF_IPC_MSG_SEND.\n");
 		if (copy_from_user(&xaf_msg, data32, sizeof(xaf_msg))) {
 			ret = -EINVAL;
-			logd("HIFI_MISC_IOCTL_XAF_IPC_MSG_SEND: couldn't copy xf_proxy_msg\n");
 			break;
 		}
 		send_xaf_ipc_msg_to_dsp(&xaf_msg);
@@ -969,15 +968,17 @@ static long hifi_misc_ioctl(struct file *fd, unsigned int cmd,
 
 	case HIFI_MISC_IOCTL_XAF_IPC_MSG_RECV:
 	{
-		struct xf_proxy_msg xaf_msg;
 
-		read_xaf_ipc_msg_from_dsp(&xaf_msg, xaf_msg.length);
+		xf_proxy_message_usr_t xaf_msg;
 
-		logi("ioctl: HIFI_MISC_IOCTL_XAF_IPC_MSG_RECV.\n");
-		if (copy_to_user(data32, &xaf_msg, sizeof(xaf_msg))) {
-			ret = -EINVAL;
-			logd("HIFI_MISC_IOCTL_XAF_IPC_MSG_RECV: couldn't copy xf_proxy_msg\n");
-		}
+		ret = read_xaf_ipc_msg_from_dsp(&xaf_msg,
+			&(s_misc_data.xaf_waitq), data32);
+	}
+	break;
+
+	case HIFI_MISC_IOCTL_XAF_IPC_VMSG_PTR:
+	{
+		ret = shared_mem_section_allocate(data32);
 	}
 	break;
 
@@ -1095,21 +1096,9 @@ static int hifi_misc_mmap(struct file *file, struct vm_area_struct *vma)
 	OUT_FUNCTION;
 	return ret;
 }
-
 static unsigned int hifi_misc_poll(struct file *filp, poll_table *wait)
 {
-	unsigned int mask = 0;
-
-	logi("Enter hifi_misc_poll.\n");
-	/*put the queue into poll_table*/
-	poll_wait(filp, &(s_misc_data.xaf_waitq), wait);
-
-	if (hasData) {
-		mask |= POLLIN | POLLRDNORM;
-		logi("notify read  process\n");
-	}
-
-	return mask;
+	return poll_om(filp, &(s_misc_data.xaf_waitq), wait);
 }
 
 static ssize_t hifi_misc_proc_read(struct file *file, char __user *buf,
@@ -1618,7 +1607,7 @@ static int hifi_misc_probe(struct platform_device *pdev)
 	}
 
 	/*Register for interrupt from DSP*/
-	ap_ipc_int_init();
+	ap_ipc_int_init(&s_misc_data.xaf_waitq);
 
 	OUT_FUNCTION;
 	return OK;
