@@ -741,238 +741,384 @@ static const struct file_operations hifi_debug_proc_ops = {
 #define HIKEY_AP2DSP_MSG_QUEUE_SIZE 0x1800
 #define HIKEY_DSP2AP_MSG_QUEUE_ADDR (HIKEY_AP2DSP_MSG_QUEUE_ADDR + HIKEY_AP2DSP_MSG_QUEUE_SIZE)
 #define HIKEY_DSP2AP_MSG_QUEUE_SIZE 0x1800
+static xf_shmem_data_t        *shmem;
+static xf_proxy_message_usr_t     response_msg;
+
+wait_queue_head_t	*xaf_waitq;
+static xf_proxy_t           xf_proxy;
+uint64_t v_shmem;
 
 
-
-static struct hikey_ap2dsp_msg_head *msg_head;
-
-static void hikey_ap_mailbox_read_queue(
-			struct hikey_ap2dsp_msg_head *queue_head,
-			char *data, unsigned int size)
+static inline xf_message_t *xf_msg_alloc(xf_proxy_t *proxy)
 {
-	unsigned int size_to_bottom = 0;
-	struct hikey_ap2dsp_msg_head *hikey_msg_head = 0;
+	xf_message_t	*m;
 
-	hikey_msg_head = (struct hikey_ap2dsp_msg_head *)((char *)(msg_head)+HIKEY_DSP2AP_MSG_QUEUE_SIZE);
-	size_to_bottom = (HIKEY_AP2DSP_MSG_QUEUE_SIZE - queue_head->read_pos);
-	if (size_to_bottom > size) {
-		memcpy(data, (char *)((char *)hikey_msg_head + queue_head->read_pos), size);
-		queue_head->read_pos += size;
-	} else {
-		memcpy(data, (char *)((char *)hikey_msg_head + queue_head->read_pos), size_to_bottom);
-		memcpy(data + size_to_bottom,
-		(char *)((char *)hikey_msg_head + sizeof(struct hikey_ap2dsp_msg_head)),
-		size - size_to_bottom);
-		queue_head->read_pos = sizeof(struct hikey_ap2dsp_msg_head) + (size - size_to_bottom);
-	}
+	if (list_empty(&proxy->free))
+		return NULL;
+
+	m = list_first_entry(&proxy->free, xf_message_t, node);
+	list_del(&m->node);
+	return m;
 }
-int hikey_ap_mailbox_read(struct hikey_msg_with_content *hikey_msg)
+
+static inline xf_message_t *xf_msg_queue_head(xf_msg_queue_t *queue)
 {
-	struct hikey_ap2dsp_msg_head *hikey_msg_head = 0;
+	xf_message_t	*m = list_first_entry(&queue->entry, xf_message_t, node);
+	return m;
+}
+
+static inline int xf_msg_enqueue(xf_msg_queue_t *queue, xf_message_t *m)
+{
+	int first = list_empty(&queue->entry);
+
+	list_add_tail(&m->node, &queue->entry);
+	return first;
+}
+
+static inline xf_message_t *xf_msg_dequeue(xf_msg_queue_t *queue)
+{
+	xf_message_t   *m;
+
+	if (list_empty(&queue->entry))
+		return NULL;
+	m = list_first_entry(&queue->entry, xf_message_t, node);
+	list_del(&m->node);
+	return m;
+}
+
+static inline void xf_msg_queue_init(xf_msg_queue_t *queue)
+{
+	INIT_LIST_HEAD(&queue->entry);
+}
+
+static inline void xf_msg_free(xf_proxy_t *proxy, xf_message_t *m)
+{
+	list_add(&m->node, &proxy->free);
+}
+
+static inline void xf_cmap(xf_proxy_t *proxy, xf_message_t *m)
+{
+	/* ...place message into local response queue */
+	xf_msg_enqueue(&proxy->response, m);
+}
+static int xf_proxy_init(void)
+{
+	xf_proxy_t     *proxy = &xf_proxy;
+	xf_message_t   *m;
+	int             i;
+	/* ...create a list of all messages in a pool; set head pointer */
+	INIT_LIST_HEAD(&proxy->free);
+	/* ...put all messages into a single-linked list */
+	for (i = 0, m = &proxy->pool[0]; i < XF_CFG_MESSAGE_POOL_SIZE - 1; i++, m++)
+		list_add_tail(&m->node, &proxy->free);
+	/* ...initialize proxy thread message queues */
+	xf_msg_queue_init(&proxy->response);
+	return 0;
+}
+unsigned int poll_om(struct file *filp, wait_queue_head_t *xaf_waitq1,
+	poll_table *wait)
+{
+	xf_proxy_t         *proxy = &xf_proxy;
+	unsigned int             mask;
+	/* ...register client waiting queue */
+	poll_wait(filp, xaf_waitq1, wait);
+	mask = (xf_msg_queue_head(&proxy->response) ? POLLIN | POLLRDNORM : 0);
+	return mask;
+}
+int hikey_ap_mailbox_read(xf_proxy_message_t *hikey_msg)
+{
+	uint32_t       read_idx, write_idx;
+	xf_proxy_message_t  *response;
+	xf_message_t   *m;
+	xf_proxy_t         *proxy = &xf_proxy;
 
 	if (!hikey_msg) {
 		loge("have no memory to save hikey msg\n");
 		return -1;
 	}
+	/* ...get current values of read/write pointers in response queue */
+	read_idx = XF_PROXY_READ(shmem, rsp_read_idx);
+	write_idx = XF_PROXY_READ(shmem, rsp_write_idx);
+	while (!XF_QUEUE_EMPTY(read_idx, write_idx)) {
+		/* ...allocate execution message */
+		m = xf_msg_alloc(proxy);
+		if (m == NULL)
+			break;
+		/* ...get oldest not yet processed response */
+		response = XF_PROXY_RESPONSE(shmem, XF_QUEUE_IDX(read_idx));
+		/*  ...synchronize memory contents */
+		XF_PROXY_INVALIDATE(response, sizeof(*response));
+		/* ...fill message parameters */
+		m->id = response->id;
+		m->opcode = response->opcode;
+		m->length = response->length;
+		m->address = response->address;
+		m->v_address = response->v_address;
+		/* ...advance local reading index copy */
+		read_idx = XF_QUEUE_ADVANCE_IDX(read_idx);
+		/* ...update shadow copy of reading index */
+		XF_PROXY_WRITE(shmem, rsp_read_idx, read_idx);
+		/* ...submit message to proper client */
+		xf_cmap(proxy, m);
 
-	hikey_msg_head = (struct hikey_ap2dsp_msg_head *)((char *)(msg_head)+HIKEY_DSP2AP_MSG_QUEUE_SIZE);
-
-	if (hikey_msg_head->head_protect_word != HIKEY_MSG_HEAD_PROTECT_WORD) {
-		loge("hikey msg head protect word error,0x%x\n", hikey_msg_head->head_protect_word);
-		return -1;
 	}
-
-	hikey_ap_mailbox_read_queue(hikey_msg_head, (char *)hikey_msg, offsetof(struct hikey_ap2dsp_msg_body, msg_content));
-
-	if (hikey_msg->msg_info.msg_id == 0 || hikey_msg->msg_info.msg_len > HIKEY_AP_DSP_MSG_MAX_LEN) {
-		loge("msg id error:0x%x, or msg len error:%u\n",
-					hikey_msg->msg_info.msg_id,
-					hikey_msg->msg_info.msg_len);
-		return -1;
-	}
-
-	hikey_ap_mailbox_read_queue(hikey_msg_head, hikey_msg->msg_info.msg_content,
-			hikey_msg->msg_info.msg_len - offsetof(struct hikey_ap2dsp_msg_body, msg_content));
-
 	return 0;
 }
-
-
 static DECLARE_COMPLETION(msg_completion);
 
-void hikey_ap_msg_process(struct hikey_msg_with_content *hikey_msg)
+void hikey_ap_msg_process(xf_proxy_message_t *hikey_msg)
 {
 	if (!hikey_msg) {
 		loge("hikey msg is null\n");
 		return;
 	}
-	switch (hikey_msg->msg_info.msg_id) {
-	case ID_AUDIO_AP_OM_CMD:
-		complete(&msg_completion);
-		break;
-	case ID_XAF_DSP_TO_AP:
-		hasData = true;
-		loge("msg id:%x\n", hikey_msg->msg_info.msg_id);
-		loge("id:%x\n", hikey_msg->msg_info.xf_dsp_msg.id);
-		loge("opcode:%x\n", hikey_msg->msg_info.xf_dsp_msg.opcode);
-		loge("length:%x\n", hikey_msg->msg_info.xf_dsp_msg.length);
-		loge("address:%lx\n", (unsigned long)hikey_msg->msg_info.xf_dsp_msg.address);
-		break;
-	default:
-		loge("unknown msg id:0x%x\n", hikey_msg->msg_info.msg_id);
-		break;
-	}
+	response_msg.id = hikey_msg->id;
+	response_msg.opcode = hikey_msg->opcode;
+	response_msg.length = hikey_msg->length;
+	response_msg.address = hikey_msg->address;
+	response_msg.v_address = hikey_msg->v_address;
+	complete(&msg_completion);
+	hasData = true;
 
 	return;
 }
 
 
-static void hikey_init_share_mem(char *share_mem_addr, unsigned int share_mem_size)
+static void hikey_init_share_mem(char *share_mem_addr,
+	unsigned int share_mem_size)
 {
 	if (!share_mem_addr) {
 		loge("share memory is null\n");
 		return;
 	}
-
 	memset(share_mem_addr, 0, share_mem_size);
-	msg_head = (struct hikey_ap2dsp_msg_head *)share_mem_addr;
-	msg_head->head_protect_word = HIKEY_MSG_HEAD_PROTECT_WORD;
-	msg_head->msg_num = 0;
-	msg_head->read_pos = (unsigned int)sizeof(struct hikey_ap2dsp_msg_head);
-	msg_head->write_pos = msg_head->read_pos;
+	shmem = (xf_shmem_data_t *)share_mem_addr;
+	/* initialize shared memory interface */
+	XF_PROXY_WRITE(shmem, cmd_read_idx, 0);
+	XF_PROXY_WRITE(shmem, cmd_write_idx, 0);
+	XF_PROXY_WRITE(shmem, rsp_read_idx, 0);
+	XF_PROXY_WRITE(shmem, rsp_write_idx, 0);
+
 }
 
-static void hikey_ap2dsp_write_msg(struct hikey_ap2dsp_msg_body *hikey_msg)
+static void hikey_ap2dsp_write_msg(xf_proxy_message_t *hikey_msg)
 {
-	unsigned int size_to_bottom = 0;
-	unsigned int write_size = 0;
+	uint32_t             read_idx, write_idx;
+	xf_proxy_message_t *command;
 
-	if (!msg_head) {
-		loge("hikey share memory not init\n");
-		return;
-	}
-
+	loge("Enter %s\n", __func__);
 	if (!hikey_msg) {
 		loge("msg is null\n");
 		return;
 	}
-
-	if (msg_head->head_protect_word != HIKEY_MSG_HEAD_PROTECT_WORD) {
-		loge("hikey msg head protect word error,0x%x\n",
-		     msg_head->head_protect_word);
+	write_idx = XF_PROXY_READ(shmem, cmd_write_idx);
+	read_idx = XF_PROXY_READ(shmem, cmd_read_idx);
+	if (XF_QUEUE_FULL(read_idx, write_idx)) {
+		loge("command queue is full\n");
 		return;
 	}
-
-	write_size = hikey_msg->msg_len;
-	size_to_bottom = (HIKEY_DSP2AP_MSG_QUEUE_SIZE - msg_head->write_pos);
-
-	if (write_size >= HIKEY_DSP2AP_MSG_QUEUE_SIZE) {
-		loge("msg is too long\n");
-		return;
-	}
-
-	if (size_to_bottom > write_size) {
-		memcpy((char *)((char *)msg_head + msg_head->write_pos),
-		       hikey_msg, write_size);
-		msg_head->write_pos += write_size;
-	} else {
-		memcpy((char *)((char *)msg_head + msg_head->write_pos),
-		       hikey_msg, size_to_bottom);
-		memcpy((char *)((char *)msg_head +
-				sizeof(struct hikey_ap2dsp_msg_head)),
-		       (char *)hikey_msg + size_to_bottom,
-		       write_size - size_to_bottom);
-		msg_head->write_pos =
-		    sizeof(struct hikey_ap2dsp_msg_head) + (write_size -
-							    size_to_bottom);
-	}
-
-	msg_head->msg_num++;
+	/* ...select the place for the command */
+	command = XF_PROXY_COMMAND(shmem, XF_QUEUE_IDX(write_idx));
+	/* ...put the response message fields */
+	command->id = hikey_msg->id;
+	command->opcode = hikey_msg->opcode;
+	command->length = hikey_msg->length;
+	command->address = hikey_msg->address;
+	command->v_address = hikey_msg->v_address;
+	/* ...flush the content of the caches to main memory */
+	XF_PROXY_FLUSH(command, sizeof(*command));
+	/* ...advance local writing index copy */
+	write_idx = XF_QUEUE_ADVANCE_IDX(write_idx);
+	shmem->local.cmd_write_idx = write_idx;
+	loge("Exit %s\n", __func__);
 }
 
 /*Interrupt receiver */
-#define IPC_ACPU_INT_SRC_HIFI_MSG	(1)
-#define K3_SYS_IPC_CORE_HIFI		(4)
+#define IPC_ACPU_INT_SRC_HIFI_MSG  (1)
+#define K3_SYS_IPC_CORE_HIFI (4)
 typedef void (*VOIDFUNCCPTR)(unsigned int);
 static void _dsp_to_ap_ipc_irq_proc(void)
 {
-	struct hikey_msg_with_content hikey_msg;
+	xf_proxy_message_t hikey_msg;
 
-	memset(&hikey_msg, 0, sizeof(struct hikey_msg_with_content));
-	if (hikey_ap_mailbox_read(&hikey_msg)) {
-		loge("read msg error\n");
-	} else {
-		hikey_ap_msg_process(&hikey_msg);
-	}
+	logi("Enter %s\n", __func__);
+	hikey_ap_mailbox_read(&hikey_msg);
 
 	/*clear interrupt */
 	DRV_k3IpcIntHandler_Autoack();
+	wake_up(xaf_waitq);
+	logi("Exit %s\n", __func__);
 }
-
-void ap_ipc_int_init(void)
+void ap_ipc_int_init(wait_queue_head_t *xaf_waitq_lp)
 {
 	logi("Enter %s\n", __func__);
+	xaf_waitq = xaf_waitq_lp;
+	xf_proxy_init();
 	IPC_IntConnect(IPC_ACPU_INT_SRC_HIFI_MSG,
-		(VOIDFUNCCPTR)_dsp_to_ap_ipc_irq_proc,
-				IPC_ACPU_INT_SRC_HIFI_MSG);
+			(VOIDFUNCCPTR)_dsp_to_ap_ipc_irq_proc,
+			IPC_ACPU_INT_SRC_HIFI_MSG);
 	IPC_IntEnable(IPC_ACPU_INT_SRC_HIFI_MSG);
 	logi("Exit %s\n", __func__);
 }
+#define XF_PROXY_NULL (~0U)
+#define XF_CFG_REMOTE_IPC_POOL_SIZE     (256 << 10)
+ssize_t shared_mem_section_allocate(void __user *data32)
+{
+	v_shmem = (uint64_t)data32;
+	return 1;
+}
+static inline unsigned long int xf_ipc_v_a2b(uint64_t shmem, u32 address)
+{
+	if (address < XF_CFG_REMOTE_IPC_POOL_SIZE)
+		return shmem + address;
+	else if (address == XF_PROXY_NULL)
+		return 0;
+	else
+		return -1;
+}
 
-int send_xaf_ipc_msg_to_dsp(struct xf_proxy_msg *xaf_msg)
+int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 {
 	int ret;
 	unsigned char *music_buf = NULL;
-	struct hikey_ap2dsp_msg_body hikey_msg;
-
-	if (WARN_ON(xaf_msg->length > HIFI_MUSIC_DATA_SIZE))
-		return -EINVAL;
-
-	hikey_msg.msg_id = ID_XAF_AP_TO_DSP;
-	hikey_msg.msg_len = sizeof(hikey_msg);
-	hikey_msg.xf_dsp_msg = *xaf_msg;
-	hikey_msg.xf_dsp_msg.address = HIFI_MUSIC_DATA_LOCATION;
-
-	music_buf = (unsigned char *)ioremap_wc(HIFI_MUSIC_DATA_LOCATION, HIFI_MUSIC_DATA_SIZE);
-	/* ...get proxy message from user-space */
-	if (copy_from_user(music_buf, (void __user *)xaf_msg->address, xaf_msg->length)) {
-		iounmap(music_buf);
-		loge("%s: couldn't copy buffer %p from user %p\n", __func__, music_buf, (void *)xaf_msg->address);
-		return -EINVAL;
-	}
-	iounmap(music_buf);
-	hikey_ap2dsp_write_msg(&hikey_msg);
-	ret = (int)mailbox_send_msg(MAILBOX_MAILCODE_ACPU_TO_HIFI_MISC, &hikey_msg, hikey_msg.msg_len);
-
-	return ret;
-}
-
-int read_xaf_ipc_msg_from_dsp(void *buf, unsigned int size)
-{
-	int           ret     = OK;
-	return ret;
-}
-
-static int hifi_send_str_todsp(const char *cmd_str, size_t size)
-{
-	int           ret     = OK;
-	struct hikey_ap2dsp_msg_body *hikey_msg = kmalloc(sizeof(*hikey_msg) + size, GFP_KERNEL);
+	unsigned char *temp_buf = NULL;
+	xf_proxy_message_t *hikey_msg = kmalloc(sizeof(*hikey_msg), GFP_KERNEL);
 
 	if (!hikey_msg)
 		return -ENOMEM;
-	BUG_ON(cmd_str == NULL);
+	if (WARN_ON(xaf_msg->length > HIFI_MUSIC_DATA_SIZE))
+		return -EINVAL;
+	hikey_msg->id      = xaf_msg->id;
+	hikey_msg->opcode  = xaf_msg->opcode;
+	hikey_msg->length  = xaf_msg->length;
+	hikey_msg->address = xaf_msg->address;
+	temp_buf = (char *)xf_ipc_v_a2b(v_shmem, xaf_msg->address);
+	/*Need to update later with Alloc logic inplace GJB TBD*/
+	music_buf = NULL;
+	if (xaf_msg->address != XF_PROXY_NULL)	{
+		music_buf = (unsigned char *)ioremap_wc(
+			HIFI_MUSIC_DATA_LOCATION+xaf_msg->address,
+			hikey_msg->length);
+		if (copy_from_user(music_buf,
+			(void __user *)temp_buf, xaf_msg->length)) {
+			iounmap(music_buf);
+			loge("copy error\n");
+			return -EINVAL;
+		}
+	}
+	if (music_buf != NULL)
+		loge("music_buf 0x%s\n", music_buf);
 
-	hikey_msg->msg_id = ID_AP_AUDIO_STR_CMD;
-	hikey_msg->msg_len = offsetof(struct hikey_ap2dsp_msg_body, msg_content) + size + 1;
-	memcpy(&hikey_msg->msg_content, cmd_str, size);
-	hikey_msg->msg_content[size] = 0;
-
+	iounmap(music_buf);
 	hikey_ap2dsp_write_msg(hikey_msg);
-	ret = (int)IPC_IntSend(K3_SYS_IPC_CORE_HIFI,0);
+	ret = IPC_IntSend(K3_SYS_IPC_CORE_HIFI, 0);
+	if (ret < 0)	{
+		loge("INterrupt error\n");
+		return ret;
+	}
+	kfree(hikey_msg);
+
+	return ret;
+}
+static inline xf_message_t *xf_msg_received(xf_proxy_t *proxy,
+	xf_msg_queue_t *queue)
+{
+	xf_message_t   *m;
+	/* ...try to peek message from the queue */
+	m = xf_msg_dequeue(queue);
+	if (m == NULL) {
+		/* ...queue is empty; release lock */
+		loge("xf_msg_received-error\n");
+	}
+	/* ...if message is non-null, lock is held */
+	return m;
+}
+static inline xf_message_t *xf_cmd_recv(xf_proxy_t *proxy,
+	wait_queue_head_t *wq, xf_msg_queue_t *queue, int wait)
+{
+	xf_message_t   *m;
+	/* ...wait for message reception (take lock on success) */
+	if (wait_event_interruptible(*wq, (m = xf_msg_received(proxy, queue)) != NULL || !wait))
+		return ERR_PTR(-EINTR);
+
+	/* ...return message with a lock taken */
+	return m;
+}
+ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
+	wait_queue_head_t *wq, void __user *data32)
+{
+	xf_proxy_t     *proxy = &xf_proxy;
+	xf_message_t       *m;
+	unsigned char *music_buf = NULL;
+	unsigned char *temp_buf = NULL;
+	xf_proxy_message_usr_t msg;
+
+	logi("read_xaf_ipc_msg_from_dsp\n");
+	if (!proxy)
+		return 0;// -EPERM;
+
+	m = xf_cmd_recv(proxy, wq, &proxy->response, 1);
+	if (IS_ERR(m))	{
+		pr_err("receiving failed: %d", (int)PTR_ERR(m));
+		return PTR_ERR(m);
+	}
+
+	if (m == NULL)
+		return -EAGAIN;
+	xaf_msg->id = m->id;
+	xaf_msg->opcode = m->opcode;
+	xaf_msg->length = m->length;
+	xaf_msg->address = m->address;
+	xf_msg_free(proxy, m);
+	temp_buf = (char *)xf_ipc_v_a2b(v_shmem, xaf_msg->address);
+	music_buf = NULL;
+	logi("HIFI_MUSIC_DATA_LOCATION+xaf_msg->address=%x\n",
+		HIFI_MUSIC_DATA_LOCATION+xaf_msg->address);
+	if (xaf_msg->address != XF_PROXY_NULL)	{
+		music_buf = (unsigned char *)ioremap_wc(
+			HIFI_MUSIC_DATA_LOCATION+xaf_msg->address,
+			xaf_msg->length);
+		logi("music_buf=%p\n", music_buf);
+		if (copy_to_user((void __user *)temp_buf,
+			music_buf, xaf_msg->length))	{
+			iounmap(music_buf);
+			loge("copy error\n");
+			return -EFAULT;
+		}
+	}
+	iounmap(music_buf);
+	if (copy_to_user(data32, xaf_msg, sizeof(msg)))	{
+		logi("HIFI couldn't copy xf_proxy_msg\n");
+		return -EFAULT;
+	}
+	return sizeof(msg);
+}
+static int hifi_send_str_todsp(const char *cmd_str, size_t size)
+{
+	int           ret     = OK;
+	xf_proxy_message_t *hikey_msg = kmalloc(sizeof(*hikey_msg) + size,
+		GFP_KERNEL);
+	unsigned char *music_buf = NULL;
+	if (!hikey_msg)
+		return -ENOMEM;
+	BUG_ON(cmd_str == NULL);
+	hikey_msg->id      = ID_AP_AUDIO_STR_CMD;
+	hikey_msg->length  = size+1;
+	hikey_msg->address = HIFI_MUSIC_DATA_LOCATION;
+	music_buf = (unsigned char *)ioremap_wc(HIFI_MUSIC_DATA_LOCATION, size);
+	memcpy((char *)music_buf, cmd_str, size);
+	hikey_ap2dsp_write_msg(hikey_msg);
+	ret = IPC_IntSend(K3_SYS_IPC_CORE_HIFI, 0);
+	if (ret < 0)	{
+		loge("Interrupt error\n");
+		kfree(hikey_msg);
+		return ret;
+	}
 	kfree(hikey_msg);
 	return ret;
 }
-int send_pcm_data_to_dsp(void __user *buf, unsigned int size)
+#define FAULT_INJECT_OFFSET 0x100
+int send_pcm_data_to_dsp(void *buf, unsigned int size)
 {
 	char cmd[40];
 	int           ret     = OK;
@@ -982,7 +1128,9 @@ int send_pcm_data_to_dsp(void __user *buf, unsigned int size)
 	if (WARN_ON(size > HIFI_MUSIC_DATA_SIZE))
 		return -EINVAL;
 
-	music_buf = (unsigned char *)ioremap_wc(HIFI_MUSIC_DATA_LOCATION, HIFI_MUSIC_DATA_SIZE);
+	music_buf = (unsigned char *)ioremap_wc(
+		HIFI_MUSIC_DATA_LOCATION+FAULT_INJECT_OFFSET,
+		HIFI_MUSIC_DATA_SIZE);
 	ret = copy_from_user(music_buf, buf, size);
 	iounmap(music_buf);
 	if (ret) {
@@ -990,13 +1138,10 @@ int send_pcm_data_to_dsp(void __user *buf, unsigned int size)
 		return -EINVAL;
 	}
 
-	sprintf(cmd, "pcm_gain 0x%08x 0x%08x", HIFI_MUSIC_DATA_LOCATION, size);
+	sprintf(cmd, "pcm_gain 0x8B300100 0x%08x", size);
 	ret = hifi_send_str_todsp(cmd, strlen(cmd));
-
-	if (ret < 0) {
-		loge("%s: couldn't send message to DSP\n", __func__);
+	if (ret < 0)
 		return ret;
-	}
 
 	wait_for_completion(&msg_completion);
 	pcm_buf  = (unsigned char *)ioremap_wc(PCM_PLAY_BUFF_LOCATION, PCM_PLAY_BUFF_SIZE);

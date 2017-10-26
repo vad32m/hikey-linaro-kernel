@@ -12,6 +12,7 @@
 #define _AUDIO_HIFI_H
 
 #include <linux/types.h>
+#include <linux/list.h>
 
 typedef enum {
 	HIFI_CHN_SYNC_CMD = 0,
@@ -250,7 +251,7 @@ typedef struct xf_proxy             xf_proxy_t;
 
 /* ...execution message */
 struct xf_message {
-	xf_message_t	*next;
+	struct		list_head node;
 	uint32_t	id;
 	uint32_t	opcode;
 	uint32_t	length;
@@ -260,14 +261,13 @@ struct xf_message {
 
 /* ...message queue */
 struct xf_msg_queue {
-	xf_message_t	*head;
-	xf_message_t	*tail;
+	struct          list_head entry;
 };
 /* ...proxy data */
 struct xf_proxy {
 	xf_msg_queue_t	response;
 	xf_message_t	pool[XF_CFG_MESSAGE_POOL_SIZE];
-	xf_message_t	*free;
+	struct          list_head free;
 };
 #define HIFI_MISC_IOCTL_ASYNCMSG		_IOWR('A', 0x70, struct misc_io_async_param)
 #define HIFI_MISC_IOCTL_SYNCMSG 		_IOW('A', 0x71, struct misc_io_sync_param)
