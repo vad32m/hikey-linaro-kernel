@@ -271,26 +271,35 @@ typedef struct {
 	unsigned int level_num;
 } debug_level_com;
 
-struct hikey_ap2dsp_msg_head {
-	unsigned int head_protect_word;
-	unsigned int msg_num;
-	unsigned int read_pos;
-	unsigned int write_pos;
+/* ...alignment for shared buffers */
+#define XF_PROXY_ALIGNMENT              64
+#define XF_PROXY_MESSAGE_QUEUE_LENGTH   (1 << 8)
+/* ...data managed by host CPU (remote) - in case of shunt it is a IPC layer */
+struct xf_proxy_host_data	{
+	/* ...command queue */
+	xf_proxy_message_t	command[XF_PROXY_MESSAGE_QUEUE_LENGTH];
+	/* ...writing index into command queue */
+	uint32_t	cmd_write_idx;
+	/* ...reading index for response queue */
+	uint32_t	rsp_read_idx;
+};
+/* ...data managed by DSP (local) */
+struct xf_proxy_dsp_data	{
+	/* ...response queue */
+	xf_proxy_message_t	response[XF_PROXY_MESSAGE_QUEUE_LENGTH];
+	/* ...writing index into response queue */
+	int32_t	rsp_write_idx;
+	/* ...reading index for command queue */
+	uint32_t	cmd_read_idx;
 };
 
-struct hikey_ap2dsp_msg_body {
-	unsigned short msg_id;
-	unsigned short msg_len; /*size of the whole message*/
-	union {
-		char msg_content[0];
-		struct xf_proxy_msg xf_dsp_msg;
-	};
-};
+/* ...shared memory data */
+typedef struct xf_shmem_data	{
+	struct xf_proxy_host_data	local;
+	struct xf_proxy_dsp_data	remote;
+	uint8_t	*buffer;
 
-struct hikey_msg_with_content {
-	struct hikey_ap2dsp_msg_body msg_info;
-	char msg_content[HIKEY_AP_DSP_MSG_MAX_LEN];
-};
+}	xf_shmem_data_t;
 
 struct hifi_effect_info_stru {
 	unsigned int	effect_id;
@@ -374,29 +383,107 @@ do {\
 #define IN_FUNCTION   logd("begin.\n");
 #define OUT_FUNCTION  logd("end.\n");
 
-	int load_hifi_img_by_misc(void);
+int load_hifi_img_by_misc(void);
+/*******************************************************************************
+ * Helper macros
+ ******************************************************************************/
+/* ...memory barrier */
+#define XF_PROXY_BARRIER()                  \
+	barrier()
+/* ...memory invalidation */
+#define XF_PROXY_INVALIDATE(buf, length)    \
+	({ barrier(); buf; })
+/* ...memory flushing */
+#define XF_PROXY_FLUSH(buf, length)         \
+	({ barrier(); buf; })
+/*******************************************************************************
+ * Accessors
+ ******************************************************************************/
+/* ...shared memory data accessor */
+#define XF_SHMEM_DATA(shmem)                \
+	(shmem)
+/* ...atomic reading */
+#define __XF_PROXY_READ_ATOMIC(var)         \
+	(var)
+/* ...atomic writing */
+#define __XF_PROXY_WRITE_ATOMIC(var, value) \
+	((var) = (value))
+/* ...accessors */
+#define XF_PROXY_READ(shmem, field)          \
+	__XF_PROXY_READ_##field(XF_SHMEM_DATA(shmem))
+#define XF_PROXY_WRITE(shmem, field, v)      \
+	__XF_PROXY_WRITE_##field(XF_SHMEM_DATA(shmem), (v))
+/* ...individual fields reading */
+#define __XF_PROXY_READ_cmd_write_idx(shmem)        \
+	__XF_PROXY_READ_ATOMIC(shmem->local.cmd_write_idx)
+#define __XF_PROXY_READ_cmd_read_idx(shmem)         \
+	shmem->remote.cmd_read_idx
+#define __XF_PROXY_READ_rsp_write_idx(shmem)        \
+	shmem->remote.rsp_write_idx
+#define __XF_PROXY_READ_rsp_read_idx(shmem)         \
+	__XF_PROXY_READ_ATOMIC(shmem->local.rsp_read_idx)
+/* ...individual fields writings */
+#define __XF_PROXY_WRITE_cmd_write_idx(shmem, v)    \
+	__XF_PROXY_WRITE_ATOMIC(shmem->local.cmd_write_idx, v)
+#define __XF_PROXY_WRITE_cmd_read_idx(shmem, v)     \
+	__XF_PROXY_WRITE_ATOMIC(shmem->remote.cmd_read_idx, v)
+#define __XF_PROXY_WRITE_rsp_read_idx(shmem, v)     \
+	__XF_PROXY_WRITE_ATOMIC(shmem->local.rsp_read_idx, v)
+#define __XF_PROXY_WRITE_rsp_write_idx(shmem, v)    \
+	__XF_PROXY_WRITE_ATOMIC(shmem->remote.rsp_write_idx, v)
+/* ...command buffer accessor */
+#define XF_PROXY_COMMAND(shmem, idx)                \
+	(&XF_SHMEM_DATA(shmem)->local.command[(idx)])
+/* ...response buffer accessor */
+#define XF_PROXY_RESPONSE(shmem, idx)               \
+	(&XF_SHMEM_DATA(shmem)->remote.response[(idx)])
+/*******************************************************************************
+ * Ring buffer support
+ ******************************************************************************/
+/* ...total length of shared memory queue (for commands and responses) */
+#define XF_PROXY_MESSAGE_QUEUE_LENGTH   (1 << 8)
+/* ...index mask */
+#define XF_PROXY_MESSAGE_QUEUE_MASK     0xFF
+#define __XF_QUEUE_IDX(idx, counter)    \
+	(((idx) & XF_PROXY_MESSAGE_QUEUE_MASK) | ((counter) << 16))
+/* ...retrieve ring-buffer index */
+#define XF_QUEUE_IDX(idx)               \
+	((idx) & XF_PROXY_MESSAGE_QUEUE_MASK)
+/* ...increment ring-buffer index */
+#define XF_QUEUE_ADVANCE_IDX(idx)       \
+	(((idx) + 0x1) & (0xFFFF0000 | XF_PROXY_MESSAGE_QUEUE_MASK))
+/* ...test if ring buffer is empty */
+#define XF_QUEUE_EMPTY(read, write)     \
+	((read) == (write))
+/* ...test if ring buffer is full */
+#define XF_QUEUE_FULL(read, write)      \
+	((write) == (read) + (XF_PROXY_MESSAGE_QUEUE_LENGTH << 16))
 
-	void hifi_om_init(struct platform_device *dev, unsigned char *hifi_priv_base_virt, unsigned char *hifi_priv_base_phy);
-	void hifi_om_deinit(struct platform_device *dev);
-
-	int hifi_dsp_dump_hifi(void __user *arg);
-	void hifi_dump_panic_log(void);
-
-	bool hifi_is_loaded(void);
-	void ap_ipc_int_init(void);
-
-	void hifi_om_effect_mcps_info_show(struct hifi_om_effect_mcps_stru *hifi_mcps_info);
-	void hifi_om_cpu_load_info_show(struct hifi_om_load_info_stru *hifi_om_info);
-	void hifi_om_update_buff_delay_info_show(struct hifi_om_update_buff_delay_info *info);
-
-	int hifi_get_dmesg(void __user *arg);
-	int hifi_om_get_voice_bsd_param(void __user *uaddr);
-	void hifi_om_rev_data_handle(int type, const unsigned char *addr, unsigned int len);
-	int send_pcm_data_to_dsp(void __user *buf, unsigned int size);
-	struct xf_proxy_msg;
-	int send_xaf_ipc_msg_to_dsp(struct xf_proxy_msg *xaf_msg);
-	int read_xaf_ipc_msg_from_dsp(void *buf, unsigned int size);
-
+void hifi_om_init(struct platform_device *dev,
+	unsigned char *hifi_priv_base_virt,
+	unsigned char *hifi_priv_base_phy);
+void hifi_om_deinit(struct platform_device *dev);
+int hifi_dsp_dump_hifi(void __user *arg);
+void hifi_dump_panic_log(void);
+bool hifi_is_loaded(void);
+void ap_ipc_int_init(wait_queue_head_t *xaf_waitq_lp);
+unsigned int poll_om(struct file *filp, wait_queue_head_t *xaf_waitq,
+	 poll_table *wait);
+void hifi_om_effect_mcps_info_show(
+	struct hifi_om_effect_mcps_stru *hifi_mcps_info);
+void hifi_om_cpu_load_info_show(
+	struct hifi_om_load_info_stru *hifi_om_info);
+void hifi_om_update_buff_delay_info_show(
+	struct hifi_om_update_buff_delay_info *info);
+int hifi_get_dmesg(void __user *arg);
+int hifi_om_get_voice_bsd_param(void __user *uaddr);
+void hifi_om_rev_data_handle(int type, const unsigned char *addr,
+	unsigned int len);
+int send_pcm_data_to_dsp(void __user *buf, unsigned int size);
+int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg);
+ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
+	wait_queue_head_t *wq, void __user *data32);
+ssize_t shared_mem_section_allocate(void __user *data32);
 #ifdef __cplusplus
 #if __cplusplus
 }
