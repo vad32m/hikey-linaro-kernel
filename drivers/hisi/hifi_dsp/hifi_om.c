@@ -746,7 +746,6 @@ static xf_proxy_message_usr_t     response_msg;
 
 wait_queue_head_t	*xaf_waitq;
 static xf_proxy_t           xf_proxy;
-uint64_t v_shmem;
 
 
 static inline xf_message_t *xf_msg_alloc(xf_proxy_t *proxy)
@@ -971,28 +970,10 @@ void ap_ipc_int_init(wait_queue_head_t *xaf_waitq_lp)
 	IPC_IntEnable(IPC_ACPU_INT_SRC_HIFI_MSG);
 	logi("Exit %s\n", __func__);
 }
-#define XF_PROXY_NULL (~0U)
-#define XF_CFG_REMOTE_IPC_POOL_SIZE     (256 << 10)
-ssize_t shared_mem_section_allocate(void __user *data32)
-{
-	v_shmem = (uint64_t)data32;
-	return 1;
-}
-static inline unsigned long int xf_ipc_v_a2b(uint64_t shmem, u32 address)
-{
-	if (address < XF_CFG_REMOTE_IPC_POOL_SIZE)
-		return shmem + address;
-	else if (address == XF_PROXY_NULL)
-		return 0;
-	else
-		return -1;
-}
 
 int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 {
 	int ret;
-	unsigned char *music_buf = NULL;
-	unsigned char *temp_buf = NULL;
 	xf_proxy_message_t *hikey_msg = kmalloc(sizeof(*hikey_msg), GFP_KERNEL);
 
 	if (!hikey_msg)
@@ -1005,24 +986,9 @@ int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 	hikey_msg->opcode  = xaf_msg->opcode;
 	hikey_msg->length  = xaf_msg->length;
 	hikey_msg->address = xaf_msg->address;
-	temp_buf = (char *)xf_ipc_v_a2b(v_shmem, xaf_msg->address);
-	/*Need to update later with Alloc logic inplace GJB TBD*/
-	music_buf = NULL;
-	if (xaf_msg->address != XF_PROXY_NULL)	{
-		music_buf = (unsigned char *)ioremap_wc(
-			HIFI_MUSIC_DATA_LOCATION+xaf_msg->address,
-			hikey_msg->length);
-		if (copy_from_user(music_buf,
-			(void __user *)temp_buf, xaf_msg->length)) {
-			iounmap(music_buf);
-			loge("copy error\n");
-			kfree(hikey_msg);
-			return -EINVAL;
-		}
-	}
 
-	iounmap(music_buf);
 	hikey_ap2dsp_write_msg(hikey_msg);
+
 	ret = IPC_IntSend(K3_SYS_IPC_CORE_HIFI, 0);
 	if (ret < 0)	{
 		loge("Interrupt error\n");
@@ -1033,6 +999,7 @@ int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 
 	return ret;
 }
+
 static inline xf_message_t *xf_msg_received(xf_proxy_t *proxy,
 	xf_msg_queue_t *queue)
 {
@@ -1062,13 +1029,11 @@ ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
 {
 	xf_proxy_t     *proxy = &xf_proxy;
 	xf_message_t       *m;
-	unsigned char *music_buf = NULL;
-	unsigned char *temp_buf = NULL;
 	xf_proxy_message_usr_t msg;
 
 	logi("read_xaf_ipc_msg_from_dsp\n");
 	if (!proxy)
-		return 0;// -EPERM;
+		return 0;
 
 	mutex_lock(&proxy->xf_mutex);
 	m = xf_cmd_recv(proxy, wq, &proxy->response, 0);
@@ -1085,22 +1050,6 @@ ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
 	xaf_msg->length = m->length;
 	xaf_msg->address = m->address;
 	xf_msg_free(proxy, m);
-	temp_buf = (char *)xf_ipc_v_a2b(v_shmem, xaf_msg->address);
-	music_buf = NULL;
-	logi("HIFI_MUSIC_DATA_LOCATION+xaf_msg->address=%x\n",
-		HIFI_MUSIC_DATA_LOCATION+xaf_msg->address);
-	if (xaf_msg->address != XF_PROXY_NULL)	{
-		music_buf = (unsigned char *)ioremap_wc(
-			HIFI_MUSIC_DATA_LOCATION+xaf_msg->address,
-			xaf_msg->length);
-		if (copy_to_user((void __user *)temp_buf,
-			music_buf, xaf_msg->length))	{
-			iounmap(music_buf);
-			loge("copy error\n");
-			return -EFAULT;
-		}
-	}
-	iounmap(music_buf);
 	if (copy_to_user(data32, xaf_msg, sizeof(msg)))	{
 		logi("HIFI couldn't copy xf_proxy_msg\n");
 		return -EFAULT;

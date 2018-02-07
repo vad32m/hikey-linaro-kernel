@@ -976,12 +976,6 @@ static long hifi_misc_ioctl(struct file *fd, unsigned int cmd,
 	}
 	break;
 
-	case HIFI_MISC_IOCTL_XAF_IPC_VMSG_PTR:
-	{
-		ret = shared_mem_section_allocate(data32);
-	}
-	break;
-
 	case HIFI_MISC_IOCTL_ASYNCMSG:
 		logd("ioctl: HIFI_MISC_IOCTL_ASYNCMSG.\n");
 		ret = hifi_dsp_async_cmd((unsigned long)data32);

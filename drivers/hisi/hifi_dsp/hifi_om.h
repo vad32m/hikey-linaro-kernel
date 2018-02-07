@@ -483,7 +483,6 @@ int send_pcm_data_to_dsp(void __user *buf, unsigned int size);
 int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg);
 ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
 	wait_queue_head_t *wq, void __user *data32);
-ssize_t shared_mem_section_allocate(void __user *data32);
 #ifdef __cplusplus
 #if __cplusplus
 }
