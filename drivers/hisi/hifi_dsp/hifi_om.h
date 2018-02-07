@@ -451,7 +451,7 @@ int load_hifi_img_by_misc(void);
 	((idx) & XF_PROXY_MESSAGE_QUEUE_MASK)
 /* ...increment ring-buffer index */
 #define XF_QUEUE_ADVANCE_IDX(idx)       \
-	(((idx) + 0x1) & (0xFFFF0000 | XF_PROXY_MESSAGE_QUEUE_MASK))
+	(((idx) + 0x10001) & (0xFFFF0000 | XF_PROXY_MESSAGE_QUEUE_MASK))
 /* ...test if ring buffer is empty */
 #define XF_QUEUE_EMPTY(read, write)     \
 	((read) == (write))

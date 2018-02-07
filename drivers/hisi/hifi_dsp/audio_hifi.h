@@ -267,7 +267,8 @@ struct xf_msg_queue {
 struct xf_proxy {
 	xf_msg_queue_t	response;
 	xf_message_t	pool[XF_CFG_MESSAGE_POOL_SIZE];
-	struct          list_head free;
+	struct          list_head	free;
+	struct		mutex		xf_mutex;
 };
 #define HIFI_MISC_IOCTL_ASYNCMSG		_IOWR('A', 0x70, struct misc_io_async_param)
 #define HIFI_MISC_IOCTL_SYNCMSG 		_IOW('A', 0x71, struct misc_io_sync_param)

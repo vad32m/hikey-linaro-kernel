@@ -813,18 +813,12 @@ static int xf_proxy_init(void)
 		list_add_tail(&m->node, &proxy->free);
 	/* ...initialize proxy thread message queues */
 	xf_msg_queue_init(&proxy->response);
+
+	/*...initialize proxy mutex */
+	mutex_init(&proxy->xf_mutex);
 	return 0;
 }
-unsigned int poll_om(struct file *filp, wait_queue_head_t *xaf_waitq1,
-	poll_table *wait)
-{
-	xf_proxy_t         *proxy = &xf_proxy;
-	unsigned int             mask;
-	/* ...register client waiting queue */
-	poll_wait(filp, xaf_waitq1, wait);
-	mask = (xf_msg_queue_head(&proxy->response) ? POLLIN | POLLRDNORM : 0);
-	return mask;
-}
+
 int hikey_ap_mailbox_read(xf_proxy_message_t *hikey_msg)
 {
 	uint32_t       read_idx, write_idx;
@@ -836,6 +830,7 @@ int hikey_ap_mailbox_read(xf_proxy_message_t *hikey_msg)
 		loge("have no memory to save hikey msg\n");
 		return -1;
 	}
+	mutex_lock(&proxy->xf_mutex);
 	/* ...get current values of read/write pointers in response queue */
 	read_idx = XF_PROXY_READ(shmem, rsp_read_idx);
 	write_idx = XF_PROXY_READ(shmem, rsp_write_idx);
@@ -860,10 +855,26 @@ int hikey_ap_mailbox_read(xf_proxy_message_t *hikey_msg)
 		XF_PROXY_WRITE(shmem, rsp_read_idx, read_idx);
 		/* ...submit message to proper client */
 		xf_cmap(proxy, m);
-
 	}
+	mutex_unlock(&proxy->xf_mutex);
 	return 0;
 }
+
+unsigned int poll_om(struct file *filp, wait_queue_head_t *xaf_waitq1,
+	poll_table *wait)
+{
+	xf_proxy_t         *proxy = &xf_proxy;
+	unsigned int             mask;
+	xf_proxy_message_t hikey_msg;
+
+	/* ...register client waiting queue */
+	poll_wait(filp, xaf_waitq1, wait);
+
+	hikey_ap_mailbox_read(&hikey_msg);
+	mask = (xf_msg_queue_head(&proxy->response) ? POLLIN | POLLRDNORM : 0);
+	return mask;
+}
+
 static DECLARE_COMPLETION(msg_completion);
 
 void hikey_ap_msg_process(xf_proxy_message_t *hikey_msg)
@@ -905,16 +916,19 @@ static void hikey_ap2dsp_write_msg(xf_proxy_message_t *hikey_msg)
 {
 	uint32_t             read_idx, write_idx;
 	xf_proxy_message_t *command;
+	xf_proxy_t     *proxy = &xf_proxy;
 
-	loge("Enter %s\n", __func__);
+	logi("Enter %s\n", __func__);
 	if (!hikey_msg) {
 		loge("msg is null\n");
 		return;
 	}
+	mutex_lock(&proxy->xf_mutex);
 	write_idx = XF_PROXY_READ(shmem, cmd_write_idx);
 	read_idx = XF_PROXY_READ(shmem, cmd_read_idx);
 	if (XF_QUEUE_FULL(read_idx, write_idx)) {
 		loge("command queue is full\n");
+		mutex_unlock(&proxy->xf_mutex);
 		return;
 	}
 	/* ...select the place for the command */
@@ -930,7 +944,8 @@ static void hikey_ap2dsp_write_msg(xf_proxy_message_t *hikey_msg)
 	/* ...advance local writing index copy */
 	write_idx = XF_QUEUE_ADVANCE_IDX(write_idx);
 	shmem->local.cmd_write_idx = write_idx;
-	loge("Exit %s\n", __func__);
+	mutex_unlock(&proxy->xf_mutex);
+	logi("Exit %s\n", __func__);
 }
 
 /*Interrupt receiver */
@@ -939,11 +954,7 @@ static void hikey_ap2dsp_write_msg(xf_proxy_message_t *hikey_msg)
 typedef void (*VOIDFUNCCPTR)(unsigned int);
 static void _dsp_to_ap_ipc_irq_proc(void)
 {
-	xf_proxy_message_t hikey_msg;
-
 	logi("Enter %s\n", __func__);
-	hikey_ap_mailbox_read(&hikey_msg);
-
 	/*clear interrupt */
 	DRV_k3IpcIntHandler_Autoack();
 	wake_up(xaf_waitq);
@@ -1006,8 +1017,6 @@ int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 			return -EINVAL;
 		}
 	}
-	if (music_buf != NULL)
-		loge("music_buf 0x%s\n", music_buf);
 
 	iounmap(music_buf);
 	hikey_ap2dsp_write_msg(hikey_msg);
@@ -1028,7 +1037,7 @@ static inline xf_message_t *xf_msg_received(xf_proxy_t *proxy,
 	m = xf_msg_dequeue(queue);
 	if (m == NULL) {
 		/* ...queue is empty; release lock */
-		loge("xf_msg_received-error\n");
+		logi("xf_msg queue empty\n");
 	}
 	/* ...if message is non-null, lock is held */
 	return m;
@@ -1057,7 +1066,9 @@ ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
 	if (!proxy)
 		return 0;// -EPERM;
 
-	m = xf_cmd_recv(proxy, wq, &proxy->response, 1);
+	mutex_lock(&proxy->xf_mutex);
+	m = xf_cmd_recv(proxy, wq, &proxy->response, 0);
+	mutex_unlock(&proxy->xf_mutex);
 	if (IS_ERR(m))	{
 		pr_err("receiving failed: %d", (int)PTR_ERR(m));
 		return PTR_ERR(m);
@@ -1078,7 +1089,6 @@ ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
 		music_buf = (unsigned char *)ioremap_wc(
 			HIFI_MUSIC_DATA_LOCATION+xaf_msg->address,
 			xaf_msg->length);
-		logi("music_buf=%p\n", music_buf);
 		if (copy_to_user((void __user *)temp_buf,
 			music_buf, xaf_msg->length))	{
 			iounmap(music_buf);
@@ -1665,7 +1675,7 @@ void hifi_om_init(struct platform_device *pdev,
 	memset(&g_om_data, 0, sizeof(struct hifi_om_s));
 
 	g_om_data.dev = &pdev->dev;
-	g_om_data.debug_level = 2;	/*info level */
+	g_om_data.debug_level = 1;	/* warning level */
 	g_om_data.reset_system = false;
 
 	g_om_data.dsp_time_stamp =
