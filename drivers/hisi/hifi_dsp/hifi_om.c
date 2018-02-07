@@ -52,7 +52,6 @@
 HI_DECLARE_SEMAPHORE(hifi_log_sema);
 struct hifi_om_s g_om_data;
 static struct proc_dir_entry *hifi_debug_dir;
-bool hasData;
 
 #define MAX_LEVEL_STR_LEN 32
 #define UNCONFIRM_ADDR (0)
@@ -747,7 +746,11 @@ static xf_proxy_message_usr_t     response_msg;
 wait_queue_head_t	*xaf_waitq;
 static xf_proxy_t           xf_proxy;
 
+/*******************************************************************************
+ * Messages API. All functions are requiring proxy lock taken
+ ******************************************************************************/
 
+/* ...allocate new message from the pool */
 static inline xf_message_t *xf_msg_alloc(xf_proxy_t *proxy)
 {
 	xf_message_t	*m;
@@ -760,12 +763,14 @@ static inline xf_message_t *xf_msg_alloc(xf_proxy_t *proxy)
 	return m;
 }
 
+/* ...get message queue head */
 static inline xf_message_t *xf_msg_queue_head(xf_msg_queue_t *queue)
 {
 	xf_message_t	*m = list_first_entry(&queue->entry, xf_message_t, node);
 	return m;
 }
 
+/* ...submit message to a queue */
 static inline int xf_msg_enqueue(xf_msg_queue_t *queue, xf_message_t *m)
 {
 	int first = list_empty(&queue->entry);
@@ -774,6 +779,7 @@ static inline int xf_msg_enqueue(xf_msg_queue_t *queue, xf_message_t *m)
 	return first;
 }
 
+/* ...retrieve next message from the per-task queue */
 static inline xf_message_t *xf_msg_dequeue(xf_msg_queue_t *queue)
 {
 	xf_message_t   *m;
@@ -785,6 +791,7 @@ static inline xf_message_t *xf_msg_dequeue(xf_msg_queue_t *queue)
 	return m;
 }
 
+/* ...initialize message queue */
 static inline void xf_msg_queue_init(xf_msg_queue_t *queue)
 {
 	INIT_LIST_HEAD(&queue->entry);
@@ -800,6 +807,8 @@ static inline void xf_cmap(xf_proxy_t *proxy, xf_message_t *m)
 	/* ...place message into local response queue */
 	xf_msg_enqueue(&proxy->response, m);
 }
+
+/* ...initialize shared memory interface */
 static int xf_proxy_init(void)
 {
 	xf_proxy_t     *proxy = &xf_proxy;
@@ -818,7 +827,8 @@ static int xf_proxy_init(void)
 	return 0;
 }
 
-int hikey_ap_mailbox_read(xf_proxy_message_t *hikey_msg)
+/* ...retrieve pending responses from shared memory ring-buffer */
+int xf_shmem_process_responses(xf_proxy_message_t *hikey_msg)
 {
 	uint32_t       read_idx, write_idx;
 	xf_proxy_message_t  *response;
@@ -869,8 +879,11 @@ unsigned int poll_om(struct file *filp, wait_queue_head_t *xaf_waitq1,
 	/* ...register client waiting queue */
 	poll_wait(filp, xaf_waitq1, wait);
 
-	hikey_ap_mailbox_read(&hikey_msg);
+	/* ...process all pending responses */
+	xf_shmem_process_responses(&hikey_msg);
+	mutex_lock(&proxy->xf_mutex);
 	mask = (xf_msg_queue_head(&proxy->response) ? POLLIN | POLLRDNORM : 0);
+	mutex_unlock(&proxy->xf_mutex);
 	return mask;
 }
 
@@ -888,7 +901,6 @@ void hikey_ap_msg_process(xf_proxy_message_t *hikey_msg)
 	response_msg.address = hikey_msg->address;
 	response_msg.v_address = hikey_msg->v_address;
 	complete(&msg_completion);
-	hasData = true;
 
 	return;
 }
@@ -911,7 +923,7 @@ static void hikey_init_share_mem(char *share_mem_addr,
 
 }
 
-static void hikey_ap2dsp_write_msg(xf_proxy_message_t *hikey_msg)
+static void xf_cmd_send(xf_proxy_message_t *hikey_msg)
 {
 	uint32_t             read_idx, write_idx;
 	xf_proxy_message_t *command;
@@ -971,7 +983,8 @@ void ap_ipc_int_init(wait_queue_head_t *xaf_waitq_lp)
 	logi("Exit %s\n", __func__);
 }
 
-int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
+/* ...pass command to remote DSP */
+int xf_write(xf_proxy_message_usr_t  *xaf_msg)
 {
 	int ret;
 	xf_proxy_message_t *hikey_msg = kmalloc(sizeof(*hikey_msg), GFP_KERNEL);
@@ -987,8 +1000,10 @@ int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 	hikey_msg->length  = xaf_msg->length;
 	hikey_msg->address = xaf_msg->address;
 
-	hikey_ap2dsp_write_msg(hikey_msg);
+	/* ...send asynchronous command to dsp */
+	xf_cmd_send(hikey_msg);
 
+	/* ...send interrupt to dsp */
 	ret = IPC_IntSend(K3_SYS_IPC_CORE_HIFI, 0);
 	if (ret < 0)	{
 		loge("Interrupt error\n");
@@ -1024,18 +1039,21 @@ static inline xf_message_t *xf_cmd_recv(xf_proxy_t *proxy,
 	/* ...return message with a lock taken */
 	return m;
 }
-ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
-	wait_queue_head_t *wq, void __user *data32)
+
+/* ...read next response message from proxy interface */
+ssize_t xf_read(xf_proxy_message_usr_t *xaf_msg,
+		wait_queue_head_t *wq, void __user *data32)
 {
+	/* ...get proxy interface */
 	xf_proxy_t     *proxy = &xf_proxy;
 	xf_message_t       *m;
 	xf_proxy_message_usr_t msg;
 
-	logi("read_xaf_ipc_msg_from_dsp\n");
 	if (!proxy)
 		return 0;
 
 	mutex_lock(&proxy->xf_mutex);
+	/* ...check if we have a pending response message (do not wait) */
 	m = xf_cmd_recv(proxy, wq, &proxy->response, 0);
 	mutex_unlock(&proxy->xf_mutex);
 	if (IS_ERR(m))	{
@@ -1043,15 +1061,26 @@ ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
 		return PTR_ERR(m);
 	}
 
+	/* ...check if there is a response available */
 	if (m == NULL)
 		return -EAGAIN;
+
+	/* ...prepare message parameters */
 	xaf_msg->id = m->id;
 	xaf_msg->opcode = m->opcode;
 	xaf_msg->length = m->length;
 	xaf_msg->address = m->address;
+
+	mutex_lock(&proxy->xf_mutex);
+	/* ...return the message back to a pool */
 	xf_msg_free(proxy, m);
+	mutex_unlock(&proxy->xf_mutex);
+
+	logi("read[id:%08x]: (%08x,%u,%08x)", xaf_msg->id, xaf_msg->opcode, xaf_msg->length, xaf_msg->address);
+
+	/* ...pass message to user */
 	if (copy_to_user(data32, xaf_msg, sizeof(msg)))	{
-		logi("HIFI couldn't copy xf_proxy_msg\n");
+		loge("HIFI couldn't copy xf_proxy_msg\n");
 		return -EFAULT;
 	}
 	return sizeof(msg);
@@ -1070,7 +1099,7 @@ static int hifi_send_str_todsp(const char *cmd_str, size_t size)
 	hikey_msg->address = HIFI_MUSIC_DATA_LOCATION;
 	music_buf = (unsigned char *)ioremap_wc(HIFI_MUSIC_DATA_LOCATION, size);
 	memcpy((char *)music_buf, cmd_str, size);
-	hikey_ap2dsp_write_msg(hikey_msg);
+	xf_cmd_send(hikey_msg);
 	ret = IPC_IntSend(K3_SYS_IPC_CORE_HIFI, 0);
 	if (ret < 0)	{
 		loge("Interrupt error\n");

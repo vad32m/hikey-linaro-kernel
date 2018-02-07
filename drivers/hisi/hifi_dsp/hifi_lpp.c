@@ -102,7 +102,6 @@ struct hifi_misc_priv {
 
 };
 static struct hifi_misc_priv s_misc_data;
-extern bool hasData;
 static struct notifier_block s_hifi_sr_nb;
 static struct notifier_block s_hifi_reboot_nb;
 static atomic_t volatile s_hifi_in_suspend = ATOMIC_INIT(0);
@@ -939,20 +938,6 @@ static long hifi_misc_ioctl(struct file *fd, unsigned int cmd,
 
 	switch (cmd) {
 
-	case HIFI_MISC_IOCTL_PCM_GAIN:
-	{
-		struct misc_io_pcm_buf_param buf;
-
-		logd("ioctl: HIFI_MISC_IOCTL_PCM_GAIN.\n");
-		if (copy_from_user(&buf, data32, sizeof(buf))) {
-			ret = -EINVAL;
-			logd("HIFI_MISC_IOCTL_PCM_GAIN: couldn't copy misc_io_pcm_buf_param\n");
-			break;
-		}
-		send_pcm_data_to_dsp((void *)buf.buf, buf.buf_size);
-	}
-	break;
-
 	case HIFI_MISC_IOCTL_XAF_IPC_MSG_SEND:
 	{
 		xf_proxy_message_usr_t xaf_msg;
@@ -962,7 +947,7 @@ static long hifi_misc_ioctl(struct file *fd, unsigned int cmd,
 			ret = -EINVAL;
 			break;
 		}
-		send_xaf_ipc_msg_to_dsp(&xaf_msg);
+		xf_write(&xaf_msg);
 	}
 	break;
 
@@ -971,8 +956,7 @@ static long hifi_misc_ioctl(struct file *fd, unsigned int cmd,
 
 		xf_proxy_message_usr_t xaf_msg;
 
-		ret = read_xaf_ipc_msg_from_dsp(&xaf_msg,
-			&(s_misc_data.xaf_waitq), data32);
+		ret = xf_read(&xaf_msg, &(s_misc_data.xaf_waitq), data32);
 	}
 	break;
 

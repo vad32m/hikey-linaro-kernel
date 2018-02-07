@@ -480,9 +480,9 @@ int hifi_om_get_voice_bsd_param(void __user *uaddr);
 void hifi_om_rev_data_handle(int type, const unsigned char *addr,
 	unsigned int len);
 int send_pcm_data_to_dsp(void __user *buf, unsigned int size);
-int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg);
-ssize_t read_xaf_ipc_msg_from_dsp(xf_proxy_message_usr_t *xaf_msg,
-	wait_queue_head_t *wq, void __user *data32);
+int xf_write(xf_proxy_message_usr_t  *xaf_msg);
+ssize_t xf_read(xf_proxy_message_usr_t *xaf_msg,
+		wait_queue_head_t *wq, void __user *data32);
 #ifdef __cplusplus
 #if __cplusplus
 }
