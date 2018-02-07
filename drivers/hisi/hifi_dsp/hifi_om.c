@@ -997,8 +997,10 @@ int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 
 	if (!hikey_msg)
 		return -ENOMEM;
-	if (WARN_ON(xaf_msg->length > HIFI_MUSIC_DATA_SIZE))
+	if (WARN_ON(xaf_msg->length > HIFI_MUSIC_DATA_SIZE)) {
+		kfree(hikey_msg);
 		return -EINVAL;
+	}
 	hikey_msg->id      = xaf_msg->id;
 	hikey_msg->opcode  = xaf_msg->opcode;
 	hikey_msg->length  = xaf_msg->length;
@@ -1014,6 +1016,7 @@ int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 			(void __user *)temp_buf, xaf_msg->length)) {
 			iounmap(music_buf);
 			loge("copy error\n");
+			kfree(hikey_msg);
 			return -EINVAL;
 		}
 	}
@@ -1022,7 +1025,8 @@ int send_xaf_ipc_msg_to_dsp(xf_proxy_message_usr_t  *xaf_msg)
 	hikey_ap2dsp_write_msg(hikey_msg);
 	ret = IPC_IntSend(K3_SYS_IPC_CORE_HIFI, 0);
 	if (ret < 0)	{
-		loge("INterrupt error\n");
+		loge("Interrupt error\n");
+		kfree(hikey_msg);
 		return ret;
 	}
 	kfree(hikey_msg);
