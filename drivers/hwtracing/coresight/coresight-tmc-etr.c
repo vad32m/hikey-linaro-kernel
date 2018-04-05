@@ -358,11 +358,11 @@ static void tmc_update_etr_buffer(struct coresight_device *csdev,
 				  struct perf_output_handle *handle,
 				  void *sink_config)
 {
-	int i, cur;
-	u32 *buf_ptr;
+	bool lost = false;
+	int cur;
 	u32 read_ptr, write_ptr;
-	u32 status, to_read;
-	unsigned long offset;
+	u32 status, to_read, to_copy;
+	unsigned long offset, r_offset;
 	struct cs_buffers *buf = sink_config;
 	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 
@@ -386,7 +386,7 @@ static void tmc_update_etr_buffer(struct coresight_device *csdev,
 	 */
 	status = readl_relaxed(drvdata->base + TMC_STS);
 	if (status & TMC_STS_FULL) {
-		local_inc(&buf->lost);
+		lost = true;
 		to_read = drvdata->size;
 	} else {
 		to_read = CIRC_CNT(write_ptr, read_ptr, drvdata->size);
@@ -434,24 +434,39 @@ static void tmc_update_etr_buffer(struct coresight_device *csdev,
 			read_ptr -= drvdata->size;
 		/* Tell the HW */
 		writel_relaxed(read_ptr, drvdata->base + TMC_RRP);
-		local_inc(&buf->lost);
+		lost = true;
 	}
+
+	if (lost)
+		local_inc(&buf->lost);
 
 	cur = buf->cur;
 	offset = buf->offset;
 
-	/* for every byte to read */
-	for (i = 0; i < to_read; i += 4) {
-		buf_ptr = buf->data_pages[cur] + offset;
-		*buf_ptr = readl_relaxed(drvdata->base + TMC_RRD);
+	/* Convert read pointer to buffer offset */
+	r_offset = read_ptr - drvdata->paddr;
+	to_copy = to_read;
+	while (to_copy > 0) {
+		/* Copy chunk that is minimum of data available,
+		 * data before ETR wrap point, space in output chunk */
+		u32 before_wrap = drvdata->size - r_offset;
+		u32 out_space = PAGE_SIZE - offset;
+		u32 this_chunk = min(min(to_copy, before_wrap), out_space);
 
-		offset += 4;
+		memcpy(buf->data_pages[cur] + offset, drvdata->vaddr + r_offset, this_chunk);
+
+		to_copy -= this_chunk;
+		offset += this_chunk;
 		if (offset >= PAGE_SIZE) {
 			offset = 0;
 			cur++;
 			/* wrap around at the end of the buffer */
 			cur &= buf->nr_pages - 1;
 		}
+		r_offset += this_chunk;
+		if (r_offset >= drvdata->size)
+			/* Wrap to start of buffer */
+			r_offset -= drvdata->size;
 	}
 
 	/*
