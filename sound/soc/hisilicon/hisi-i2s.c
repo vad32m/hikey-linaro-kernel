@@ -39,7 +39,6 @@
 #include <linux/regulator/consumer.h>
 
 #include "hisi-i2s.h"
-
 struct hisi_i2s {
 	struct device *dev;
 	struct reset_control *rc;
@@ -49,18 +48,36 @@ struct hisi_i2s {
 	struct pinctrl_state *pin_default;
 	struct pinctrl_state *pin_idle;
 	struct clk *asp_subsys_clk;
-	struct snd_soc_dai_driver dai;
+	struct snd_soc_dai_driver *dai;
 	void __iomem *base;
 	void __iomem *base_syscon;
 	phys_addr_t base_phys;
-	struct snd_dmaengine_dai_dma_data dma_data[2];
-	spinlock_t lock;
+	struct snd_dmaengine_dai_dma_data *dma_data[MAX_DAI_COUNT];
+	spinlock_t lock[MAX_DAI_COUNT];
 	int rate;
 	int format;
 	int bits;
 	int channels;
 	u32 master;
 	u32 status;
+};
+
+struct snd_dmaengine_dai_dma_data hii2s0_dma_data[] = {
+	{
+		.chan_name = "tx0",
+	},
+	{
+		.chan_name = "rx0",
+	}
+};
+
+struct snd_dmaengine_dai_dma_data hii2s2_dma_data[] = {
+	{
+		.chan_name = "tx2",
+	},
+	{
+		.chan_name = "rx2",
+	}
 };
 
 static void hisi_bits(struct hisi_i2s *i2s, u32 ofs, u32 reset, u32 set)
@@ -78,16 +95,31 @@ static void hisi_syscon_bits(struct hisi_i2s *i2s, u32 ofs, u32 reset, u32 set)
 }
 
 static int _hisi_i2s_set_fmt(struct hisi_i2s *i2s,
-			       struct snd_pcm_substream *substream)
+				struct snd_pcm_substream *substream,
+				struct snd_soc_dai *cpu_dai)
 {
 	switch (i2s->format & SND_SOC_DAIFMT_MASTER_MASK) {
 	case SND_SOC_DAIFMT_CBM_CFM:
 		i2s->master = false;
-		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK_SEL_REG, 0, HI_ASP_CFG_R_CLK_SEL_EN);
+		if (cpu_dai->id == HII2S0_DAI)
+			hisi_syscon_bits(i2s,
+					 HI_ASP_CFG_R_CLK_SEL_REG, 0,
+					 HI_ASP_CFG_R_CLK_SEL_EN_DAI0);
+		if (cpu_dai->id == HII2S2_DAI)
+			hisi_syscon_bits(i2s,
+					 HI_ASP_CFG_R_CLK_SEL_REG, 0,
+					 HI_ASP_CFG_R_CLK_SEL_EN_DAI1);
 		break;
 	case SND_SOC_DAIFMT_CBS_CFS:
 		i2s->master = true;
-		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK_SEL_REG, HI_ASP_CFG_R_CLK_SEL_EN,0);
+		if (cpu_dai->id == HII2S0_DAI)
+			hisi_syscon_bits(i2s,
+					 HI_ASP_CFG_R_CLK_SEL_REG,
+					 HI_ASP_CFG_R_CLK_SEL_EN_DAI0, 0);
+		if (cpu_dai->id == HII2S2_DAI)
+			hisi_syscon_bits(i2s,
+					 HI_ASP_CFG_R_CLK_SEL_REG,
+					 HI_ASP_CFG_R_CLK_SEL_EN_DAI1, 0);
 		break;
 	default:
 		return -EINVAL;
@@ -100,29 +132,69 @@ int hisi_i2s_startup(struct snd_pcm_substream *substream,
 		     struct snd_soc_dai *cpu_dai)
 {
 	struct hisi_i2s *i2s = dev_get_drvdata(cpu_dai->dev);
+	switch (cpu_dai->id) {
+	case HII2S0_DAI:
+		/* deassert reset on sio_audio*/
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_RST_CTRLDIS_REG, 0,
+						 BIT(0)|BIT(6)|BIT(8)|BIT(16));
 
-	/* deassert reset on sio_bt*/
-	hisi_syscon_bits(i2s, HI_ASP_CFG_R_RST_CTRLDIS_REG, 0,BIT(2)|BIT(6)|BIT(8)|BIT(16));
+		/* enable clk before frequency division */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_GATE_EN_REG, 0,
+						 BIT(2)|BIT(1));
 
-	/* enable clk before frequency division */
-	hisi_syscon_bits(i2s, HI_ASP_CFG_R_GATE_EN_REG, 0,BIT(5)|BIT(6));
+		/* enable frequency division */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_GATE_CLKDIV_EN_REG, 0,
+						 BIT(3)|BIT(5));
 
-	/* enable frequency division */
-	hisi_syscon_bits(i2s, HI_ASP_CFG_R_GATE_CLKDIV_EN_REG, 0,BIT(2)|BIT(5));
+		/* select clk */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK_SEL_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK_SEL);
 
-	/* select clk */
-	hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK_SEL_REG, HI_ASP_MASK,HI_ASP_CFG_R_CLK_SEL);
+		/* select clk_div */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK1_DIV_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK1_DIV_SEL);
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK3_DIV_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK4_DIV_SEL);
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK5_DIV_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK6_DIV_SEL);
+		break;
+	case HII2S2_DAI:
+		/* deassert reset on sio_bt*/
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_RST_CTRLDIS_REG, 0,
+						 BIT(2)|BIT(6)|BIT(8)|BIT(16));
 
-	/* select clk_div */
-	hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK1_DIV_REG, HI_ASP_MASK,HI_ASP_CFG_R_CLK1_DIV_SEL);
-	hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK4_DIV_REG, HI_ASP_MASK,HI_ASP_CFG_R_CLK4_DIV_SEL);
-	hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK6_DIV_REG, HI_ASP_MASK,HI_ASP_CFG_R_CLK6_DIV_SEL);
+		/* enable clk before frequency division */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_GATE_EN_REG, 0,
+						 BIT(5)|BIT(6));
 
+		/* enable frequency division */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_GATE_CLKDIV_EN_REG, 0,
+						 BIT(2)|BIT(5));
+
+		/* select clk */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK_SEL_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK_SEL);
+
+		/* select clk_div */
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK1_DIV_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK1_DIV_SEL);
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK4_DIV_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK4_DIV_SEL);
+		hisi_syscon_bits(i2s, HI_ASP_CFG_R_CLK6_DIV_REG, HI_ASP_MASK,
+						 HI_ASP_CFG_R_CLK6_DIV_SEL);
+		break;
+	default:
+		break;
+	}
 	/* sio config */
-	hisi_bits(i2s, HI_ASP_SIO_MODE_REG, HI_ASP_MASK, 0x0);
-	hisi_bits(i2s, HI_ASP_SIO_DATA_WIDTH_SET_REG, HI_ASP_MASK, 0x9);
-	hisi_bits(i2s, HI_ASP_SIO_I2S_POS_MERGE_EN_REG, HI_ASP_MASK, 0x1);
-	hisi_bits(i2s, HI_ASP_SIO_I2S_START_POS_REG, HI_ASP_MASK, 0x0);
+	hisi_bits(i2s, HI_ASP_SIO_MODE_REG +
+			 cpu_dai->id * HII2S_DAI_OFFSET, HI_ASP_MASK, 0x0);
+	hisi_bits(i2s, HI_ASP_SIO_DATA_WIDTH_SET_REG +
+			 cpu_dai->id * HII2S_DAI_OFFSET, HI_ASP_MASK, 0x9);
+	hisi_bits(i2s, HI_ASP_SIO_I2S_POS_MERGE_EN_REG +
+			 cpu_dai->id * HII2S_DAI_OFFSET, HI_ASP_MASK, 0x1);
+	hisi_bits(i2s, HI_ASP_SIO_I2S_START_POS_REG +
+			 cpu_dai->id * HII2S_DAI_OFFSET, HI_ASP_MASK, 0x0);
 
 	return 0;
 }
@@ -141,33 +213,49 @@ static void hisi_i2s_txctrl(struct snd_soc_dai *cpu_dai, int on)
 {
 	struct hisi_i2s *i2s = dev_get_drvdata(cpu_dai->dev);
 
-	spin_lock(&i2s->lock);
+	spin_lock(&i2s->lock[cpu_dai->id]);
 
 	if (on) {
 		/* enable SIO TX */
-		hisi_bits(i2s, HI_ASP_SIO_CT_SET_REG, 0,
-			HI_ASP_SIO_TX_ENABLE | HI_ASP_SIO_TX_DATA_MERGE | HI_ASP_SIO_TX_FIFO_THRESHOLD |
-			HI_ASP_SIO_RX_ENABLE |HI_ASP_SIO_RX_DATA_MERGE | HI_ASP_SIO_RX_FIFO_THRESHOLD);
+		hisi_bits(i2s, HI_ASP_SIO_CT_SET_REG +
+				 cpu_dai->id * HII2S_DAI_OFFSET, 0,
+				 HI_ASP_SIO_TX_ENABLE |
+				 HI_ASP_SIO_TX_DATA_MERGE |
+				 HI_ASP_SIO_TX_FIFO_THRESHOLD |
+				 HI_ASP_SIO_RX_ENABLE |
+				 HI_ASP_SIO_RX_DATA_MERGE |
+				 HI_ASP_SIO_RX_FIFO_THRESHOLD);
 	} else
 		/* disable SIO TX */
-		hisi_bits(i2s, HI_ASP_SIO_CT_CLR_REG, 0, HI_ASP_SIO_TX_ENABLE |HI_ASP_SIO_RX_ENABLE);
-	spin_unlock(&i2s->lock);
+		hisi_bits(i2s, HI_ASP_SIO_CT_CLR_REG +
+				 cpu_dai->id * HII2S_DAI_OFFSET, 0,
+				 HI_ASP_SIO_TX_ENABLE |
+				 HI_ASP_SIO_RX_ENABLE);
+	spin_unlock(&i2s->lock[cpu_dai->id]);
 }
 
 static void hisi_i2s_rxctrl(struct snd_soc_dai *cpu_dai, int on)
 {
 	struct hisi_i2s *i2s = dev_get_drvdata(cpu_dai->dev);
 
-	spin_lock(&i2s->lock);
+	spin_lock(&i2s->lock[cpu_dai->id]);
 	if (on)
 		/* enable SIO RX */
-		hisi_bits(i2s, HI_ASP_SIO_CT_SET_REG, 0,
-			HI_ASP_SIO_TX_ENABLE | HI_ASP_SIO_TX_DATA_MERGE | HI_ASP_SIO_TX_FIFO_THRESHOLD |
-			HI_ASP_SIO_RX_ENABLE |HI_ASP_SIO_RX_DATA_MERGE | HI_ASP_SIO_RX_FIFO_THRESHOLD);
+		hisi_bits(i2s, HI_ASP_SIO_CT_SET_REG +
+				 cpu_dai->id * HII2S_DAI_OFFSET, 0,
+				 HI_ASP_SIO_TX_ENABLE |
+				 HI_ASP_SIO_TX_DATA_MERGE |
+				 HI_ASP_SIO_TX_FIFO_THRESHOLD |
+				 HI_ASP_SIO_RX_ENABLE |
+				 HI_ASP_SIO_RX_DATA_MERGE |
+				 HI_ASP_SIO_RX_FIFO_THRESHOLD);
 	else
 		/* disable SIO RX */
-		hisi_bits(i2s, HI_ASP_SIO_CT_CLR_REG,0, HI_ASP_SIO_TX_ENABLE |HI_ASP_SIO_RX_ENABLE);
-	spin_unlock(&i2s->lock);
+		hisi_bits(i2s, HI_ASP_SIO_CT_CLR_REG +
+				 cpu_dai->id * HII2S_DAI_OFFSET, 0,
+				 HI_ASP_SIO_TX_ENABLE |
+				 HI_ASP_SIO_RX_ENABLE);
+	spin_unlock(&i2s->lock[cpu_dai->id]);
 }
 
 static int hisi_i2s_set_sysclk(struct snd_soc_dai *cpu_dai,
@@ -196,14 +284,18 @@ static int hisi_i2s_hw_params(struct snd_pcm_substream *substream,
 
         dma_data = snd_soc_dai_get_dma_data(cpu_dai, substream);
 
-	_hisi_i2s_set_fmt(i2s, substream);
+	_hisi_i2s_set_fmt(i2s, substream, cpu_dai);
 
 	dma_data->maxburst = 4;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		dma_data->addr = i2s->base_phys + HI_ASP_SIO_I2S_DUAL_TX_CHN_REG;
+		dma_data->addr = i2s->base_phys +
+				 HI_ASP_SIO_I2S_DUAL_TX_CHN_REG +
+				 cpu_dai->id * HII2S_DAI_OFFSET;
 	else
-		dma_data->addr = i2s->base_phys + HI_ASP_SIO_I2S_DUAL_RX_CHN_REG;
+		dma_data->addr = i2s->base_phys +
+				 HI_ASP_SIO_I2S_DUAL_RX_CHN_REG +
+				 cpu_dai->id * HII2S_DAI_OFFSET;
 
 	switch (params_format(params)) {
 	case SNDRV_PCM_FORMAT_U16_LE:
@@ -254,12 +346,12 @@ static int hisi_i2s_trigger(struct snd_pcm_substream *substream, int cmd,
 static int hisi_i2s_dai_probe(struct snd_soc_dai *dai)
 {
 	struct hisi_i2s *i2s = snd_soc_dai_get_drvdata(dai);
+	spin_lock_init(&i2s->lock[dai->id]);
+	snd_soc_dai_init_dma_data(dai,
+		 &i2s->dma_data[dai->id][SNDRV_PCM_STREAM_PLAYBACK],
+		 &i2s->dma_data[dai->id][SNDRV_PCM_STREAM_CAPTURE]);
 
-        snd_soc_dai_init_dma_data(dai,
-                                  &i2s->dma_data[SNDRV_PCM_STREAM_PLAYBACK],
-                                  &i2s->dma_data[SNDRV_PCM_STREAM_CAPTURE]);
-
-        return 0;
+	return 0;
 }
 
 
@@ -272,8 +364,10 @@ static struct snd_soc_dai_ops hisi_i2s_dai_ops = {
 	.shutdown	= hisi_i2s_shutdown,
 };
 
-struct snd_soc_dai_driver hisi_i2s_dai_init = {
-	.name = "hisi_i2s",
+struct snd_soc_dai_driver hisi_i2s_dai_init[] = {
+	{
+	.name = "hisi_i2s0",
+	.id = HII2S0_DAI,
 	.probe		= hisi_i2s_dai_probe,
 	.playback = {
 		.channels_min = 2,
@@ -290,6 +384,27 @@ struct snd_soc_dai_driver hisi_i2s_dai_init = {
 		.rates = SNDRV_PCM_RATE_48000,
 	},
 	.ops = &hisi_i2s_dai_ops,
+	},
+	{
+	.name = "hisi_i2s2",
+	.id = HII2S2_DAI,
+	.probe		= hisi_i2s_dai_probe,
+	.playback = {
+		.channels_min = 2,
+		.channels_max = 2,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE |
+			   SNDRV_PCM_FMTBIT_U16_LE,
+		.rates = SNDRV_PCM_RATE_48000,
+	},
+	.capture = {
+		.channels_min = 2,
+		.channels_max = 2,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE |
+			   SNDRV_PCM_FMTBIT_U16_LE,
+		.rates = SNDRV_PCM_RATE_48000,
+	},
+	.ops = &hisi_i2s_dai_ops,
+	}
 };
 
 static const struct snd_soc_component_driver hisi_i2s_i2s_comp = {
@@ -328,9 +443,7 @@ static int hisi_i2s_probe(struct platform_device *pdev)
 	i2s = devm_kzalloc(dev,sizeof(*i2s), GFP_KERNEL);
 	if (!i2s)
 		return -ENOMEM;
-
 	i2s->dev = dev;
-	spin_lock_init(&i2s->lock);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
@@ -382,19 +495,22 @@ static int hisi_i2s_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	i2s->dma_data[HII2S0_DAI] = hii2s0_dma_data;
+	i2s->dma_data[HII2S2_DAI] = hii2s2_dma_data;
+
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev,
-					      &hisi_dmaengine_pcm_config,
-					      0);
+			 &hisi_dmaengine_pcm_config,
+			 SND_DMAENGINE_PCM_FLAG_CUSTOM_CHANNEL_NAME);
 	if (ret)
 		return ret;
 
 	ret = snd_soc_register_component(&pdev->dev, &hisi_i2s_i2s_comp,
-					 &i2s->dai, 1);
+					 i2s->dai, 2);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register dai\n");
 		return ret;;
 	}
-	dev_info(&pdev->dev, "Registered as %s\n", i2s->dai.name);
+	dev_info(&pdev->dev, "Registered as %s\n", i2s->dai[0].name);
 
 	return 0;
 }

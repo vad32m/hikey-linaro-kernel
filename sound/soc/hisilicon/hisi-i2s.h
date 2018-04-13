@@ -20,7 +20,12 @@
 
 #ifndef _HISI_I2S_H
 #define _HISI_I2S_H
-
+#define HII2S_DAI_OFFSET 0x800
+enum {
+HII2S0_DAI = 0,
+HII2S2_DAI,
+MAX_DAI_COUNT
+};
   enum hisi_bits {
 	HII2S_BITS_16,
 	HII2S_BITS_18,
@@ -76,8 +81,10 @@ enum hisi_i2s_rates {
 #define HI_ASP_SIO_I2S_DUAL_TX_CHN_REG		(0xC0)
 
 
-#define HI_ASP_CFG_R_CLK_SEL_EN				BIT(2)
-#define HI_ASP_CFG_R_CLK_SEL				0x140010
+#define HI_ASP_CFG_R_CLK_SEL_EN_DAI1				BIT(2)
+#define HI_ASP_CFG_R_CLK_SEL_EN_DAI0				BIT(0)
+
+#define HI_ASP_CFG_R_CLK_SEL				0x150010
 #define HI_ASP_CFG_R_CLK1_DIV_SEL			0xbcdc9a
 #define HI_ASP_CFG_R_CLK4_DIV_SEL			0x00ff000f
 #define HI_ASP_CFG_R_CLK6_DIV_SEL			0x00ff003f

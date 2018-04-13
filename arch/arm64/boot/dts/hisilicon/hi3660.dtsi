@@ -1315,14 +1315,23 @@
 			};
 		};
 
-		i2s2: hisi_i2s {
+		hii2s: hisi_i2s {
 			compatible = "hisilicon,hisi-i2s";
-			reg = <0x0 0xe804f800 0x0 0x400>,
+			reg = <0x0 0xe804f000 0x0 0xc00>,
 			      <0x0 0xe804e000 0x0 0x400>;
 			pinctrl-names = "default";
-			pinctrl-0 = <&i2s2_pmx_func &i2s2_cfg_func>;
-			dmas = <&asp_dmac 18 &asp_dmac 19>;
-			dma-names = "rx", "tx";
+			pinctrl-0 = <&i2s2_pmx_func &i2s2_cfg_func
+						&i2s0_pmx_func &i2s0_cfg_func>;
+			dmas = <&asp_dmac 22 &asp_dmac 23
+					&asp_dmac 18 &asp_dmac 19>;
+			dma-names = "rx0", "tx0", "rx2", "tx2";
+			#sound-dai-cells = <1>;
+		};
+
+		hii2splat: hisi_i2s_plat {
+			compatible = "hisilicon,hisi-i2s-plat";
+			dmas = <&asp_dmac 22 &asp_dmac 23>;
+			dma-names = "rx0", "tx0";
 			#sound-dai-cells = <0>;
 		};
 
@@ -1333,7 +1342,7 @@
 			dma-channels = <16>;
 			dma-requests = <32>;
 			dma-min-chan = <0>;
-			dma-used-chans = <0xFFFE>;
+			dma-used-chans = <0xFFF0>;
 			dma-share;
 			interrupts = <0 216 4>;
 			interrupt-names = "asp_dma_irq";
@@ -1342,19 +1351,32 @@
 
 		sound {
 			compatible = "simple-audio-card";
-			simple-audio-card,name = "hikey-hdmi";
-			simple-audio-card,format = "i2s";
+			simple-audio-card,name = "hikey-sndcard";
 
-			simple-audio-card,bitclock-master = <&sound_master>;
-			simple-audio-card,frame-master = <&sound_master>;
-
-			sound_master: simple-audio-card,cpu {
-				sound-dai = <&i2s2>;
+			simple-audio-card,dai-link@0 {
+				format = "i2s";
+				cpu {
+					sound-dai = <&hii2s 1>;
+				};
+				codec {
+					sound-dai = <&adv7533>;
+				};
 			};
 
-			simple-audio-card,codec {
-				sound-dai = <&adv7533>;
+			simple-audio-card,dai-link@1 {
+				format = "i2s";
+				cpu {
+					sound-dai = <&hii2s 0>;
+				};
+				codec {
+					sound-dai = <&hii2splat>;
+				};
+				plat {
+					sound-dai = <&hii2splat>;
+				};
 			};
+
+
 		};
 	};
 };
