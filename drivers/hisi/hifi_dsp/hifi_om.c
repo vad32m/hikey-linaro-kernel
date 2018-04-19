@@ -1297,14 +1297,19 @@ int load_hifi_img_by_misc(void)
 	char *img_buf = NULL;
 	struct drv_hifi_image_head *hifi_img = NULL;
 	const struct firmware *hifi_firmware;
+	xf_proxy_t         *proxy = &xf_proxy;
 
-	if (g_om_data.dsp_loaded == true)
+	mutex_lock(&proxy->xf_mutex);
+	if (g_om_data.hifi3_firmware_load == true) {
+		mutex_unlock(&proxy->xf_mutex);
 		return 0;
+	}
 
 	loge("load hifi image now\n");
 
 	if (request_firmware(&hifi_firmware, "hifi/hifi.img", g_om_data.dev) < 0) {
 		loge("could not find firmware file hifi/hifi.img\n");
+		mutex_unlock(&proxy->xf_mutex);
 		return -ENOENT;
 	}
 
@@ -1350,6 +1355,7 @@ int load_hifi_img_by_misc(void)
 			if (!iomap_dest_addr) {
 				loge("ioremap failed\n");
 				release_firmware(hifi_firmware);
+				mutex_unlock(&proxy->xf_mutex);
 				return -1;
 			}
 			memcpy_aligned((void *)(iomap_dest_addr),
@@ -1362,7 +1368,9 @@ int load_hifi_img_by_misc(void)
 	}
 
 	g_om_data.dsp_loaded = true;
+	g_om_data.hifi3_firmware_load = true;
 	release_firmware(hifi_firmware);
+	mutex_unlock(&proxy->xf_mutex);
 	return 0;
 }
 
@@ -1721,6 +1729,7 @@ void hifi_om_init(struct platform_device *pdev,
 	s_dsp_dump_info[PANIC_BIN].data_addr = g_om_data.dsp_bin_addr;
 
 	g_om_data.dsp_loaded = hifi_check_img_loaded();
+	g_om_data.hifi3_firmware_load = false;
 	hifi_set_dsp_debug_level(g_om_data.dsp_debug_level);
 
 	sema_init(&g_om_data.dsp_dump_sema, 1);

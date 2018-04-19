@@ -213,6 +213,7 @@ struct hifi_om_s {
 	DSP_ERROR_TYPE  dsp_error_type;
 
 	bool			dsp_loaded;
+	bool			hifi3_firmware_load;
 	bool			reset_system;
 	unsigned int	dsp_loaded_sign;
 
