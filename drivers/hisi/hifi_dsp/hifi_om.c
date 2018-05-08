@@ -1076,7 +1076,7 @@ ssize_t xf_read(xf_proxy_message_usr_t *xaf_msg,
 	xf_msg_free(proxy, m);
 	mutex_unlock(&proxy->xf_mutex);
 
-	logi("read[id:%08x]: (%08x,%u,%08x)", xaf_msg->id, xaf_msg->opcode, xaf_msg->length, xaf_msg->address);
+	logi("read[id:%08x]: (%08x,%u,%08llx)", xaf_msg->id, xaf_msg->opcode, xaf_msg->length, xaf_msg->address);
 
 	/* ...pass message to user */
 	if (copy_to_user(data32, xaf_msg, sizeof(msg)))	{
