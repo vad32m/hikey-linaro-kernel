@@ -98,6 +98,7 @@ struct mali_internal_sync_fence {
 	atomic_t                status;
 	struct mali_internal_sync_fence_cb    cbs[];
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
+	unsigned long           flags;
 	struct fence *fence;
 	struct fence_cb cb;
 #else
