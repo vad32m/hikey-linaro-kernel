@@ -318,7 +318,7 @@ static void *debug_job_fault_start(struct seq_file *m, loff_t *pos)
 	 * fault hasn't happened and the dumping hasn't been started,
 	 * or the dumping has finished
 	 */
-	if (*pos == 0) {
+	if (*pos == 0 && kbase_is_job_fault_event_pending(kbdev)) {
 		event = kmalloc(sizeof(*event), GFP_KERNEL);
 		if (!event)
 			return NULL;
