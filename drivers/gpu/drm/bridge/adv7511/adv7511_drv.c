@@ -689,7 +689,6 @@ static int adv7511_mode_valid(struct adv7511 *adv7511,
 	    (mode->hdisplay == 800  && mode->vdisplay == 600  && mode->clock == 48907)  ||
 	    (mode->hdisplay == 800  && mode->vdisplay == 600  && mode->clock == 40000)  ||
 	    (mode->hdisplay == 800  && mode->vdisplay == 480  && mode->clock == 32000)) {
-		mode->type |= DRM_MODE_TYPE_PREFERRED;
 		DRM_DEBUG("OK\n");
 		return MODE_OK;
 	}
